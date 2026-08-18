@@ -1,0 +1,17 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.9"
+      - run: pip install -e ".[async]" && pip install pytest pytest-asyncio
+      - run: pytest
