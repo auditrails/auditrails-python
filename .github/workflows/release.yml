@@ -1,0 +1,102 @@
+# Publishes `auditrails` to PyPI when a v* tag is pushed.
+#
+# Authenticates via PyPI trusted publishing (OIDC), so there is no API token
+# anywhere in this repo. GitHub mints a short-lived identity token scoped to
+# this workflow, PyPI verifies it against the configured publisher, and no
+# long-lived credential exists to leak, rotate, or expire.
+#
+# One-time setup on PyPI. The project does not exist yet, so this is a
+# "pending publisher", configured from the account sidebar rather than a
+# project page: https://pypi.org/manage/account/publishing/
+#
+#   PyPI project name:  auditrails
+#   Owner:              auditrails
+#   Repository name:    auditrails-python
+#   Workflow name:      release.yml
+#   Environment name:   pypi
+#
+# The first successful publish creates the project and converts the pending
+# publisher into a normal one. Note a pending publisher does NOT reserve the
+# name -- until the first publish lands, someone else could still take
+# `auditrails` on PyPI.
+#
+# Releasing after that is a version bump and a tag:
+#   # bump `version` in pyproject.toml
+#   git tag v1.0.1 && git push --tags
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build twine
+
+      # Run the suite against the built wheel rather than the source tree, so
+      # a packaging mistake (a module missing from the wheel, a bad
+      # entry point) fails here instead of after it reaches PyPI. PyPI
+      # versions are immutable; a broken one can only be yanked, not fixed.
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Install the built wheel and run the tests against it
+        run: |
+          python -m pip install "$(ls dist/*.whl)[async]"
+          python -m pip install pytest pytest-asyncio
+          python -m pytest -q
+
+      - name: Check distribution metadata
+        run: twine check dist/*
+
+      # The tag and pyproject.toml must agree, or the tag ends up pointing at
+      # a tree that does not match what was published.
+      - name: Verify tag matches project version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag v$TAG does not match pyproject.toml version $PKG"
+            exit 1
+          fi
+          echo "publishing $PKG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Named environment, so the trusted publisher can be pinned to it and
+    # branch/tag protection rules apply to releases.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/auditrails
+    permissions:
+      # Lets GitHub mint the OIDC token PyPI authenticates against. This is
+      # what replaces the API token.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # No password or token. The action exchanges the OIDC identity for a
+      # short-lived PyPI token itself.
+      - uses: pypa/gh-action-pypi-publish@release/v1
